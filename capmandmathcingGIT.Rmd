@@ -1,0 +1,262 @@
+---
+title: "matching transfer and stock"
+author: "Coen van Soest"
+date: "2025-05-23"
+output: html_document
+---
+
+reading libraries and datasets
+```{r}
+library(tidyverse)
+library(readxl)
+library(slider)
+library(writexl)
+library(purrr)
+library(zoo)
+library(progress)
+```
+
+```{r}
+abetal<-read_xlsx("abret.xlsx")
+ablag<-read_xlsx("abretlag.xlsx")
+transfers<-read_xlsx("../../data/transfers/allclubstransfersclean.xlsx")
+
+```
+
+excess returns
+```{r}
+test<-ablag
+
+test<-test%>%
+  group_by(team_name)%>%
+  mutate(returnclub=(close-lag(close))/lag(close))%>%ungroup()
+test<-test%>%
+  filter(!is.na(returnclub))
+max(test$returnclub)
+
+test<-test%>%
+  mutate(excessclub=returnclub-rfday, lagretclub=lag(returnclub))
+```
+
+rolling capm with lag, also did this without lag
+```{r}
+roll_capm <- function(df, window = 60) {
+  df <- df %>%
+    arrange(date) %>%
+    mutate(
+      alpha = NA_real_,
+      beta = NA_real_,
+      autoreg = NA_real_,
+      expected = NA_real_,
+      abnormal = NA_real_
+    )
+  
+  if (nrow(df) < window + 1) return(df)
+  
+  total <- nrow(df) - window
+  pb <- progress_bar$new(
+    format = "[:bar] :percent ETA: :eta",
+    total = total, clear = FALSE, width = 60
+  )
+  
+  roll_results <- purrr::map_dfr(
+    .x = seq(window + 1, nrow(df)),
+    .f = function(i) {
+      pb$tick()
+      
+      window_data <- df[(i - window):i, ]
+      train <- window_data[1:window, ]
+      test  <- window_data[window + 1, ]
+      
+      train$excessclub <- as.numeric(train$excessclub)
+      train$lagretclub <- as.numeric(train$lagretclub)
+      train$excessmarket <- as.numeric(train$excessmarket)
+      test$excessclub <- as.numeric(test$excessclub)
+      test$excessmarket <- as.numeric(test$excessmarket)
+      
+      model <- lm(excessclub ~ excessmarket+lagretclub, data = train)
+      pred <- predict(model, newdata = test)
+      abnormal <- test$excessclub - pred
+      tibble(
+        alpha = coef(model)[["(Intercept)"]],
+        beta = coef(model)[["excessmarket"]],
+        autoreg=coef(model)[["lagretclub"]],
+        expected = pred,
+        abnormal = abnormal
+      )
+    }
+  )
+  
+  df[(window + 1):nrow(df), c("alpha", "beta", "autoreg", "expected", "abnormal")] <- roll_results
+  return(df)
+}
+
+
+
+withab2 <- test %>%
+  group_by(team_name) %>%
+  group_modify(~ roll_capm(.x)) %>%
+  ungroup()
+write_xlsx(withab2, "abretlag.xlsx")
+
+
+```
+
+
+
+illiquidity intermezzo
+```{r}
+test<-test%>%
+  mutate(dollarvol=volume*close)%>%
+  mutate(amihud=abs(returnclub)/dollarvol)%>%
+  mutate(amihud=ifelse(volume==0, NA, amihud))
+
+amiplot<-test%>%
+  group_by(team_name)%>%
+  summarise(meanamihud=mean(amihud, na.rm=T))%>%
+  arrange(desc(meanamihud))
+
+write_xlsx(amiplot, "amiplot.xlsx")
+```
+volatility intermezzo
+```{r}
+abetal<-abetal%>%
+  arrange(team_name, date)%>%
+  group_by(team_name)%>%
+  mutate(volatility_60 = rollapply(returnclub, 60, sd, fill=NA, align="right"))%>%ungroup()
+ablag<-ablag%>%
+  arrange(team_name, date)%>%
+  group_by(team_name)%>%
+  mutate(volatility_60 = rollapply(returnclub, 60, sd, fill=NA, align="right"))%>%ungroup()
+```
+
+matching indexes to football clubs
+```{r}
+ill<-c("FC Porto", "Sporting CP", "Silkeborg IF", "SL Benfica")
+
+tomatchtal<-abetal%>%
+  filter(!(team_name %in% ill))%>%
+  select(team_name, date, country, abnormal, volatility_60)
+
+tomatchlag<-ablag%>%
+  filter(team_name %in% ill)%>%
+  select(team_name, date, country, abnormal, volatility_60)
+
+
+tomatch<-rbind(tomatchtal, tomatchlag)
+
+#tomatch<-tomatch%>%na.omit()
+```
+
+10 days forward and backward abnormal returns
+```{r}
+
+tomatch2 <- tomatch %>%
+  arrange(team_name, date) %>%
+  group_by(team_name)
+tomatch3<-tomatch2
+tomatch4<-tomatch2
+# Add lags
+for (i in 1:10) {
+  tomatch3 <- tomatch3 %>%
+    mutate(!!paste0("lag", i, "ab") := lag(abnormal, i))
+}
+
+for (i in 1:10) {
+  tomatch4 <- tomatch4 %>%
+    mutate(!!paste0("lead", i, "ab") := lead(abnormal, i))
+}
+
+tomatchto<-tomatch3%>%
+  full_join(tomatch4)
+
+tomatchto<-tomatchto%>%na.omit()
+
+write_xlsx(tomatchto,"tendaysab.xlsx")
+
+```
+
+combining transfers with abnormal returns
+```{r}
+tomatchto<-tomatchto%>%
+  mutate(date=as.Date(date))
+combined_final<-transfers%>%
+  left_join(tomatchto, by=c("team_name", "date"))
+remaining<-combined_final%>%
+  filter(is.na(abnormal))
+remaining<-remaining%>%
+  mutate(date=as.Date(date))
+combined_final<-combined_final%>%
+  anti_join(remaining)
+
+for (i in 1:5) {
+  cat("Shifting dates by", i, "day(s)...\n")
+  
+  shifted <- remaining %>%
+    mutate(date = date + 1) %>%
+    left_join(tomatchto, by = c("team_name", "date")) %>%
+    select(-ends_with(".x")) %>%
+    rename_with(~ sub("\\.y$", "", .x), ends_with(".y"))
+  
+  valid <- shifted %>% filter(!is.na(abnormal))
+  remaining <- shifted %>% filter(is.na(abnormal))
+  print(nrow(valid))
+  combined_final <- bind_rows(combined_final, valid)
+}
+
+write_xlsx(combined_final, "transfersandab.xlsx")
+```
+
+```{r}
+combinedwithnum <- combined_final %>%
+  mutate(date = as.Date(date)) %>%
+  rowwise() %>%
+  mutate(
+    transfers_before_5 = sum(
+      combined_final$team_name == team_name &
+      combined_final$date < date &
+      combined_final$date >= (date - 5)
+    ),
+    transfers_after_10 = sum(
+      combined_final$team_name == team_name &
+      combined_final$date > date &
+      combined_final$date <= (date + 5)
+    ),
+    sameday_transfer=sum(combined_final$team_name == team_name &
+      combined_final$date == date) -1
+  ) %>%
+  ungroup()
+
+tocheck<-combinedwithnum%>%
+  arrange(team_name,date)%>%
+  select(team_name,date, sameday_transfer)
+
+write_xlsx(combinedwithnum, "trans_ab_num.xlsx")
+```
+
+adding the cars
+```{r}
+tocar<-read_xlsx("trans_ab_num.xlsx")
+
+combinedwithcar <- tocar %>%
+  mutate(
+    car_pre5=rowSums(across(c(lag5ab,lag4ab,lag3ab, lag2ab, lag1ab)), na.rm = TRUE),
+    car_pre3=rowSums(across(c(lag3ab, lag2ab, lag1ab)), na.rm = TRUE),
+    car_pre1=rowSums(across(c(lag1ab)), na.rm = TRUE),
+    
+    car_5b=rowSums(across(c(lag5ab,lag4ab,lag3ab, lag2ab, lag1ab, abnormal)), na.rm = TRUE),
+    car_3b=rowSums(across(c(lag3ab, lag2ab, lag1ab, abnormal)), na.rm = TRUE),
+    car_1b=rowSums(across(c(lag1ab, abnormal)), na.rm = TRUE),
+    
+    car_5b5f=rowSums(across(c(lag5ab,lag4ab, lag3ab, lag2ab, lag1ab, abnormal, lead1ab, lead2ab, lead3ab, lead4ab, lead5ab)), na.rm = TRUE),
+    car_3b3f = rowSums(across(c(lag3ab, lag2ab, lag1ab, abnormal, lead1ab, lead2ab, lead3ab)), na.rm = TRUE),
+    car_1b1f=rowSums(across(c(lag1ab, abnormal, lead1ab)), na.rm = TRUE),
+    
+    car_1f=rowSums(across(c(abnormal, lead1ab)), na.rm = TRUE),
+    car_2f=rowSums(across(c(abnormal, lead1ab, lead2ab)), na.rm = TRUE),
+    car_3f=rowSums(across(c(abnormal, lead1ab, lead2ab, lead3ab)), na.rm = TRUE),
+    car_5f=rowSums(across(c(abnormal, lead1ab, lead2ab, lead3ab, lead4ab, lead5ab)), na.rm = TRUE),
+  )
+
+write_xlsx(combinedwithcar, "withcar.xlsx")
+```

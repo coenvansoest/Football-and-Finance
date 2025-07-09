@@ -1,0 +1,335 @@
+---
+title: "plots and summarizes"
+author: "Coen van Soest"
+date: "2025-05-16"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(psych)
+library(purrr)
+library(writexl)
+library(kableExtra)
+library(lubridate)
+```
+
+
+
+```{r}
+#returns
+abetal<-read_xlsx("abret.xlsx")
+
+#volume
+amiplot<-read_xlsx('amiplot.xlsx')
+forvol<-read_xlsx("../../data/clubstock/stockononesheet.xlsx")
+
+#transfers
+modeldata<-read_xlsx("../models/modeldata.xlsx")
+
+#rsq
+#LM
+rsqlm<-read_xlsx("../models/data/lm/fulldata/rsquaredlm.xlsx")
+rsqlm$model<-"Lin Reg Full"
+rsqlmwins<-read_xlsx("../models/data/lm/wins/rsquaredlmwins.xlsx")
+rsqlmwins$model<-"Lin Reg Wins"
+rsqlmnodate<-read_xlsx("../models/data/lm/nodate/rsquaredlmnodate.xlsx")
+rsqlmnodate$model<-"Lin Reg ND"
+
+#RF
+rsqrf<-read_xlsx("../models/data/rf/fulldata/rsquaredrf.xlsx")
+rsqrf$model<-"RF Full"
+rsqrfwins<-read_xlsx("../models/data/rf/wins/rsquaredrfwins.xlsx")
+rsqrfwins$model<-"RF Wins"
+rsqrfnodate<-read_xlsx("../models/data/rf/nodate/rsquaredrfnodate.xlsx")
+rsqrfnodate$model<-"RF ND"
+
+#XGB
+rsqxgb<-read_xlsx("../models/data/xgb/fulldata/rsquaredxgb.xlsx")
+rsqxgb$model<-"XGB Full"
+rsqxgbwins<-read_xlsx("../models/data/xgb/wins/rsquaredxgb_winsorized.xlsx")
+rsqxgbwins$model<-"XGB Wins"
+rsqxgbnodate<-read_xlsx("../models/data/xgb/nodate/rsquaredxgbnodate2.xlsx")
+rsqxgbnodate$model<-"XGB ND"
+
+#SHAP
+shaprfnodate<-read_xlsx("../models/data/rf/nodate/shapsummrfnodate.xlsx")
+shapxgbnodate<-read_xlsx("../models/data/xgb/nodate/featimportancenodate2.xlsx")
+shaplinnodate<-read_xlsx("../models/data/lm/nodate/shapsummlmnodate.xlsx")
+
+#event study
+
+event<-read_xlsx("../models/data/lm/coefs/coefsnodate.xlsx")
+coeftab<-read_xlsx("eventstudytab.xlsx")
+
+#bigshaps
+#bigshaprf<-read_xlsx("../models/data/rf/nodate/bigshaprfnodate.xlsx")
+bigshapxgb<-read_xlsx("../models/data/xgb/nodate/bigshapnodate2.xlsx")
+bigshaprf<-read_xlsx("../models/bigshaprfnodateshort.xlsx")
+```
+returnclub describtives
+```{r}
+#describe from psych package doesnt work natively with dplyr, so we have to work around this
+grouped <- abetal %>% group_split(team_name) #different tibble per team name
+teams <- abetal %>% distinct(team_name) %>% pull(team_name) #extract teamnames for labeling
+
+results <- map2(grouped, teams, function(df, team) { #map2 used to iterate the function over the two objects we created
+  desc <- describe(df$returnclub)
+  desc$team_name <- team
+  desc
+})
+
+# Combine into a single data frame
+final_output <- bind_rows(results)
+#write_xlsx(final_output, "descrret.xlsx")
+
+final_output%>%
+  select(team_name, mean, sd, min, max, kurtosis)%>%
+  kable("latex", caption="Descriptive Statistics of Daily Returns", digits=c(0,6,6,6,6,2), booktabs=F, linesep="", row.names = F, col.names = c("Team Name", "Mean", "SD", "Min", "Max", "Kurto"))%>%
+  kable_styling(latex_options = "hold_position")
+
+```
+volume describtives
+```{r}
+relativevolume<-forvol%>%
+  mutate(relvol=volume/shares_outstanding)%>%
+  group_by(team_name)%>%
+  summarise(meanvol=mean(relvol), sdvol=sd(relvol))%>%ungroup()
+
+fortab<-amiplot%>%
+  left_join(relativevolume, by="team_name")
+
+fortab<-fortab%>%
+  mutate(meanamihud=meanamihud*1000)
+
+fortab%>%
+  select(team_name, meanvol, sdvol, meanamihud)%>%
+  kable("latex", caption="Relative Volume and Amihud Illiquidity", digits=c(0,6,6,6), booktabs=F, linesep="", row.names = F, col.names = c("Team Name", "Mean", "SD", "Amihud"))%>%
+  kable_styling(latex_options = "hold_position")
+
+```
+
+
+
+r squared graphs
+```{r}
+rsqlm<-rsqlm%>%
+  mutate(car=target)%>%
+  select(-target)
+rsqxgb[14,1]<-"abnormall"
+allrsq<-rbind(rsqlm, rsqlmnodate, rsqlmwins, rsqrf, rsqrfnodate, rsqrfwins, rsqxgb, rsqxgbnodate, rsqxgbwins)
+
+allrsq<-allrsq%>%
+  mutate(wins = ifelse(str_detect(model,"Wins"), "A", ifelse(str_detect(model,"ND"), "C", "B")))
+
+allrsq$car <- factor(allrsq$car, levels = c(
+  "car_pre5", "car_pre3", "car_pre1",
+ "car_5b", "car_3b", "car_1b",
+  "abnormall", 
+  "car_1f", "car_2f", "car_3f", "car_5f",
+  "car_1b1f", "car_3b3f", "car_5b5f"
+))
+
+newlabels<-c(
+   "CAR(-5,-1)", "CAR(-3,-1)", "CAR(-1)",
+   "CAR(-5,0)", "CAR(-3,0)", "CAR(-1,0)",
+  "CAR(0)",
+  "CAR(0,1)", "CAR(0,2)", "CAR(0,3)", "CAR(0,5)",
+  "CAR(-1,1)", "CAR(-3,3)", "CAR(-5,5)"
+)
+
+levels(allrsq$car)<-newlabels
+  
+ggplot(allrsq, aes(x=car, y=rsq, color=model))+
+  geom_point(size=3, alpha=0.5)+
+  theme_bw()+
+  labs(color="Type of Model", y="R-squared", x="Window")+
+   theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  facet_wrap(~wins, ncol=1)
+```
+
+transfers per date
+```{r}
+perday<-modeldata%>%
+  mutate(monthday = format(date,"%m-%d"))%>%
+  group_by(monthday)%>%
+  summarise(count=n())%>%ungroup()%>%
+  mutate(daynumber=yday(as.Date(monthday, format="%m-%d")))%>%
+  arrange(daynumber)
+
+tickpos<-c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335)
+ticklabs<-month.abb
+
+ggplot(data=perday, mapping=aes(x=daynumber, y=count, fill=count))+
+  geom_col()+
+  scale_x_continuous(breaks = tickpos, labels =ticklabs)+
+  theme_bw()+
+  labs(y="Number of Transfers", x="Month and Day", fill="# of Transfers", title="Transfers per Day")+
+  scale_fill_gradient(low="green", high="red")+
+  theme(legend.position = "none")
+  
+```
+
+SHAP graphs
+```{r}
+shaprfnodate$model<-"RF"
+shapxgbnodate$model<-"XGB"
+
+toplot<-rbind(shaprfnodate, shapxgbnodate)
+toplot<-toplot%>%
+  mutate(target = ifelse(target=="car_1f", "CAR(0,1)", ifelse(target=="car_2f", "CAR(0,2)", ifelse(target=="car_3f", "CAR(0,3)", target))))
+toplot<-toplot%>%
+  filter(target %in% c("CAR(0,1)","CAR(0,2)", "CAR(0,3)"))
+toplot<-toplot%>%
+  arrange(target,mean_abs_shap)
+
+toplot%>%
+  ggplot(mapping=aes(x=reorder(feature, -mean_abs_shap), y=mean_abs_shap, fill=model))+
+  geom_col(position = "dodge")+
+  facet_wrap(~target, ncol=1)+
+  theme_bw()+
+  labs(x="", y="Mean Absolute Shap value", fill="Model")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+feature importance plot
+```{r}
+wide_toplot <- toplot %>%
+  pivot_wider(
+    names_from = c(model, target),
+    values_from = mean_abs_shap
+  )
+
+
+wide_toplot <- wide_toplot %>%
+  rename(Feature = feature)
+
+wide_toplot %>%
+  kbl(format = "latex", booktabs = TRUE, linesep = "",
+      col.names = c("Feature", "CAR(0,1)", "CAR(0,2)", "CAR(0,3)",
+                    "CAR(0,1)", "CAR(0,2)", "CAR(0,3)"),
+      caption = "Mean Signed SHAP Values per CAR Window and Model") %>%
+  add_header_above(c(" " = 1, "XGB" = 3, "RF" = 3)) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), full_width = FALSE)
+
+
+```
+contributions linear
+```{r}
+toplot<-shaplinnodate%>%
+  mutate(target = ifelse(target=="car_1f", "CAR(0,1)", ifelse(target=="car_2f", "CAR(0,2)", ifelse(target=="car_3f", "CAR(0,3)", target))))
+toplot<-toplot%>%
+  filter(target %in% c("CAR(0,1)","CAR(0,2)", "CAR(0,3)"))
+
+toplot%>%
+  ggplot(mapping=aes(x=reorder(feature, -mean_abs_contribution), y=mean_abs_contribution))+
+  geom_col(fill="darkgreen")+
+  facet_wrap(~target, ncol=1)+
+  theme_bw()+
+  labs(x="", y="Mean Absolute Contribution")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+tables for rsquared graph
+```{r}
+#for lin table
+rsqlm<-rsqlm%>%select(-model)
+rsqlmnodate<-rsqlmnodate%>%select(-model)
+rsqlmwins<-rsqlmwins%>%select(-model)
+
+colnames(rsqlmnodate)<-c("car", "rsqnd", "rmsend", "maend")
+colnames(rsqlmwins)<-c("car", "rsqwin", "rmsewin", "maewin")
+
+lmtab<-rsqlm%>%
+  left_join(rsqlmnodate, by="car")%>%
+  left_join(rsqlmwins, by="car")
+
+#for RF table
+rsqrf<-rsqrf%>%select(-model)
+rsqrfnodate<-rsqrfnodate%>%select(-model)
+rsqrfwins<-rsqrfwins%>%select(-model)
+
+colnames(rsqrfnodate)<-c("car", "rsqnd", "rmsend", "maend")
+colnames(rsqrfwins)<-c("car", "rsqwin", "rmsewin", "maewin")
+
+rftab<-rsqrf%>%
+  left_join(rsqrfnodate, by="car")%>%
+  left_join(rsqrfwins, by="car")
+
+
+#for xgboost table
+rsqxgb<-rsqxgb%>%select(-model)
+rsqxgbnodate<-rsqxgbnodate%>%select(-model)
+rsqxgbwins<-rsqxgbwins%>%select(-model)
+
+colnames(rsqxgbnodate)<-c("car", "rsqnd", "rmsend", "maend")
+colnames(rsqxgbwins)<-c("car", "rsqwin", "rmsewin", "maewin")
+
+xgbtab<-rsqxgb%>%
+  left_join(rsqxgbnodate, by="car")%>%
+  left_join(rsqxgbwins, by="car")
+
+rftab%>%
+  select(car, rsq, rmse, mae, rsqwin, rmsewin, maewin, rsqnd, rmsend, maend)%>%
+  kable("latex", label="tab: pred rf", caption="Prediction Metrics Random Forest", digits=c(0,4,4,4,4,4,4,4,4,4), booktabs=F, linesep="", row.names = F, col.names = c("Window", "RSQ", "RMSE", "MAE", "RSQ", "RMSE", "MAE", "RSQ", "RMSE", "MAE"))%>%
+  kable_styling(latex_options = "hold_position")%>%
+  add_header_above(c(" "=1, "Full Data"=3, "Winsorized"=3, "No Date"=3), line_sep = "3pt")
+
+
+```
+
+
+event study table
+```{r}
+totab<-final_resultsout%>%
+  filter(target %in% c("car_5b", "car_3b", "car_1b", "car_1f", "car_2f", "car_3f", "car_5f"))
+colnames(totab)<-c("target", "var", "coef", 'std', "tval", "p_value", "rsq")
+
+totab<-totab%>%
+  mutate(coef = ifelse(var == "market_val", coef*1000000, coef))
+
+formatted <- totab %>%
+  mutate(
+    stars = case_when(
+      p_value < 0.01 ~ "***",
+      p_value < 0.05 ~ "**",
+      p_value < 0.10 ~ "*",
+      TRUE ~ ""
+    ),
+    estimate_fmt = paste0(formatC(coef, format = "f", digits = 6), stars)
+  )
+
+
+
+table_wide <- formatted %>%
+  select(var, target, estimate_fmt) %>%
+  pivot_wider(names_from = target, values_from = estimate_fmt)
+
+rsq_row <- formatted %>%
+  distinct(target, rsq) %>%
+  mutate(var = "R-squared", estimate_fmt = formatC(rsq, format = "f", digits = 4)) %>%
+  select(var, target, estimate_fmt) %>%
+  pivot_wider(names_from = target, values_from = estimate_fmt)
+
+
+
+final_table <- bind_rows(table_wide, rsq_row)
+
+final_table<-final_table%>%
+  filter(var!='season')%>%
+  filter(!grepl("^team_name", var))
+
+final_table<-final_table%>%
+  select(var, car_1f, car_2f, car_3f, car_5f)
+
+final_table %>%
+  kable("latex", booktabs = TRUE, linesep = "", 
+        caption = "Regression Coefficients with Significance Stars. One star means 10\\% level, two stars 5\\%, and three stars 1\\%.",
+        col.names = c("Feature", names(final_table)[-1])) %>%
+  kable_styling(latex_options = "hold_position", full_width = FALSE)
+
+
+
+```
